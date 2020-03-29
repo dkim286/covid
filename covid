@@ -379,6 +379,14 @@ function capitalize() {
 getopt --test > /dev/null 2>&1
 if [ ! $? -eq 4 ]; then 
 	echo "${script}: 'getopt' failure"
+	exit 1
+fi
+
+# using BSD's stat? turn timeline off
+timeline=1
+stat > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+	timeline=0
 fi
 
 country_code=''
@@ -393,8 +401,6 @@ parse_opts $0 "$@"
 if [ $country_code = 'us' ] && [ -n "$province" ]; then
 	# US regional timeine data is missing
 	timeline=0
-else
-	timeline=1
 fi
 data=''
 if [ $use_cache -eq 1 ]; then
