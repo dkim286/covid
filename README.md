@@ -1,8 +1,9 @@
 # `covid`
+A terminal-based COVID tracker.
 
 ## What
 
-A long-winded Bash script for querying the [Coronavirus Tracker API](https://github.com/ExpDev07/coronavirus-tracker-api).
+`covid` is a long-winded Bash script for querying the [Coronavirus Tracker API](https://github.com/ExpDev07/coronavirus-tracker-api).
 By default, `covid` loads the JSON files to disk (`$XDG_CACHE_HOME` or `$HOME/.cache`) and queries them locally. If you don't want this behavior, run the script with the `-n, --no-cache` option.
 
 ## Dependencies
