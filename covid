@@ -1,0 +1,482 @@
+#!/bin/bash
+#
+# Query the Coronavirus Tracker API and output the current tally, based on
+# country code and/or other params.
+#
+# Coronavirus Tracker: https://github.com/ExpDev07/coronavirus-tracker-api
+# ------------------------------------------------------------------------------
+
+script=`basename "$0"`
+refresh_interval=21600
+api_url="https://coronavirus-tracker-api.herokuapp.com/v2/"
+
+
+function usage () {
+	cat <<EOF
+Usage: $script <country> [, [state|province], [county]] [OPTION]...
+'country' should either be an ISO 3166 country code (US, CA, AU, ...) or 'world'.
+
+OPTIONS
+  -c, --csv              Output as comma-separated values.
+  -f, --force-refresh    Reload cached JSON files for the query.
+                         Normally, '$script' automatically reloads cached files
+                         if they're more than 6 hours old.
+  -n, --no-cache         Query the API directly without caching anything.
+  -h, --help             Display this help and exit.
+
+EXAMPLES
+  Query overall US numbers:
+  \$ $script us
+  Query worldwide numbers directly:
+  \$ $script world --no-cache
+  Query numbers for Los Angeles County:
+  \$ $script us, california, los angeles
+EOF
+}
+
+function none_found() {
+	str="'$1'"
+	[ -n "$2" ] && str="$str '$2'"
+	[ -n "$3" ] && str="$str '$3'"
+	cat <<EOF
+${script}: no result found for $str
+Note: API lacks province/county data for some countries
+EOF
+}
+
+# Reads and parses all the options.
+# $1: Name of the script (not the function)
+# $2: All the arguments that were passed to the script
+# Globals:
+#	country_code
+#	province
+#	county
+#	refresh
+#	use_cache
+#	raw_output
+function parse_opts() {
+	shift
+	local opts=cfhn
+	local lopts=csv,force-refresh,help,no-cache
+	local args=$(getopt --options=$opts --longoptions=$lopts \
+		--name "$script" -- "$@")
+	# exit if mismatched args
+	if [ ! $? -eq 0 ]; then
+		exit 1
+	fi
+
+	eval set -- "$args"
+	while true; do
+		case "$1" in
+			-c|--csv)
+				raw_output=1
+				shift 1
+				;;
+			-f|--force-refresh)
+				refresh=1
+				shift 1
+				;;
+			-h|--help)
+				usage
+				exit 0
+				;;
+			-n|--no-cache)
+				use_cache=0
+				shift 1
+				;;
+			--)
+				shift 1
+				break
+				;;
+			*)
+				echo "Critical error"
+				exit 1
+				;;
+		esac
+	done
+	if [ $# -lt 1 ]; then
+		echo "${script}: missing country code"
+		exit 1
+	fi
+
+	country_code=$(echo $@ | \
+		cut -d ',' -f1 | \
+		sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
+		tr '[:upper:]' '[:lower:]')
+	province=$(echo $@ | \
+		cut -d ',' -s -f2 | \
+		sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
+		tr '[:upper:]' '[:lower:]')
+	county=$(echo $@ | \
+		cut -d ',' -s -f3 | \
+		sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
+		tr '[:upper:]' '[:lower:]')
+}
+
+# Checks if $XDG_CACHE_HOME or $HOME/.cache exists, and creates a dir for
+# caching JSON results. 
+# Output: finished path to cache file
+function init_cache_dir() {
+	local cachedir="$HOME/.cache"
+	if [ -n "$XDG_CACHE_HOME" ]; then
+		cachedir="$XDG_CACHE_HOME"
+	elif [ ! -d $cachedir ]; then
+		echo "${script}: couldn't find .cache directory"
+		exit 1
+	else
+		cachedir="$cachedir/$script"
+	fi
+	
+	[ -d $cachedir ] || mkdir $cachedir 2>/dev/null
+	echo $cachedir
+}
+
+# Figures out which 'params' to pass to the API based on country & province.
+# CSBS (US regional data) or JHU (world data)
+# 'locations' or 'latest' from the API
+# $1: ISO country code
+# $2: Sate/province name
+# #3: County name
+# Output: Appropriate 'source' and 'model' param to stdout
+function compute_url_params() {
+	local source="jhu"
+	local model="latest"
+
+	[ $1 = 'us' ] && [ -n "$2" ] && source="csbs"; model="locations"
+	[ -n "$2" ] && model="locations"
+
+	echo $source $model
+}
+
+# Strings together a URL to use for direct querying.
+# $1: ISO country code
+# $2: State/province name
+# $3: County name
+# $4: timeline
+# Output: finished URL to stdout
+function build_url() {
+	local url=$api_url
+	if [ $1 = 'world' ]; then
+		if [ $4 -eq 0 ]; then
+			echo "${url}latest?source=jhu"
+		else
+			echo "${url}locations?source=jhu&timelines=true"
+		fi
+		return 0
+	fi
+
+	local source=''
+	local model=''
+	read source model < <(compute_url_params $1 $2 $3)
+
+	url="${url}${model}?source=${source}"
+	[ -n "$1" ] && url="${url}&country_code=$1"
+	[ -n "$2" ] && url="${url}&province=$2"
+	[ -n "$3" ] && url="${url}&county=$3"
+	url="${url// /%20}"
+
+	echo "${url}&timelines=true"
+}
+
+# Jumbles together a URL to use for caching.
+# $1: country code
+# $2: province
+# Output: finished URL to stdout
+function build_cache_url() {
+	local url="${api_url}locations"
+	if [ $1 = 'us' ] && [ -n "$2" ]; then
+		echo "${url}?source=csbs&timelines=true"
+	else
+		echo "${url}?source=jhu&timelines=true"
+	fi
+}
+
+# Makes a GET request to the provided URL.
+# $1: URL to query
+# Output: API's response string (JSON) to stdout
+function get_url() {
+	local data=$(curl -s -X GET "$1" -H "accept: application/json")
+	echo $data
+}
+
+# Extracts confirmed cases and deaths
+# $1: reduced JSON from cache
+# Output: confirmed, deaths, and recovered numbers to stdout
+function get_values() {
+	echo $1 | jq -j -s '[.[].latest]
+	| reduce .[].confirmed as $c (0; . +$c), " ", 
+	reduce .[].deaths as $d (0; .+$d), " ", 
+	reduce .[].recovered as $r (0; .+$r)'
+}
+
+# Extracts confirmed cases and deaths
+# $1: (hopefully) short JSON from live fetch
+# Output: confirmed, deaths, and recovered numbers to stdout
+function get_live_values() {
+	echo $1 | jq -j '.latest | .confirmed, " ", .deaths, " ", .recovered'
+}
+
+# Extracts country name, population, last updated datetime.
+# $1: reduced JSON from cache
+# Output: population, last updated, country nameto stdout
+function get_country_info() {
+	echo $1 | jq -j -s '.[0]
+		| .country_population, " ", .last_updated, " ", .country'
+}
+
+# Extracts country name, population, last updated datetime.
+# $1: short JSON from live fetch
+# Output: population, last updated, country name to stdout
+function get_live_country_info() {
+	echo $1 | jq -j '.locations[0] 
+		| .country, " ", .country_population, " ", .last_updated'
+}
+
+# Calcs time diff between now and provided datetime string
+# $1: 'date' compatible string, e.g. 2020-03-27T00:00:00Z or Unix timestamp
+# Output: time difference in seconds, to stdout
+function time_delta() {
+	local now=`date +%s`
+	local when=$(date -d $1 +%s 2>/dev/null)
+	if [ -z "$when" ]; then
+		when=$1
+	fi
+	echo $(($now-$when))
+}
+
+# Calculates how many seconds ago a file was modified.
+# $1: File in question
+# Output: number of econds elapsed since last modification, to stdout
+function elapsed_sec() {
+	local when=`stat -c %Y "$1"`
+	echo $(time_delta "$when")
+}
+
+# Calculates the diff. between last update's cases and today's cases.
+# $1: reduced JSON 
+# $2: Most recent confirmed
+# $3: Most recent deaths
+# $4: Most recent recovered
+# Output: Confirmed & deaths since last update
+function delta() {
+	local o_conf=$(echo $1 | \
+		jq -s '[.[].timelines.confirmed.timeline 
+			| to_entries 
+			| .[-2].value ] 
+			| reduce .[] as $pop (0; . +$pop)')
+	local o_dead=$(echo $1 | \
+		jq -s '[.[].timelines.deaths.timeline 
+			| to_entries 
+			| .[-2].value ] 
+			| reduce .[] as $pop (0; . +$pop)')
+	local o_recov=$(echo $1 | \
+		jq -s '[.[].timelines.recovered.timeline 
+			| to_entries 
+			| .[-2].value ] 
+			| reduce .[] as $pop (0; . +$pop)')
+	local n_time=$(echo $1 | \
+		jq -s -r '[.[].timelines.confirmed.timeline
+			| to_entries
+			| .[-1].key ] | .[0]')
+	local o_time=$(echo $1 | \
+		jq -s -r '[.[].timelines.confirmed.timeline
+			| to_entries
+			| .[-2].key ] | .[0]')
+	
+	echo $(($2-$o_conf)) $(($3-$o_dead)) $(($4-$o_recov)) "$n_time" "$o_time"
+}
+
+# Gets proper cache path based on params
+# $1: country_code
+# $2: province
+# Output: finished path to stdout
+function get_cache_path() {
+	local cachedir=$(init_cache_dir)
+	local cache=''
+	if [ $1 = 'us' ] && [ -n "$2" ]; then
+		cache="$cachedir/us"
+	else
+		cache="$cachedir/world"
+	fi
+	echo $cache
+}
+
+# filter down the JSON to a manageable chunk
+# $1: JSON data
+# $2: country_code
+# $3: province
+# $4: county
+# Output: hopefully a much more reduced JSON to stdout
+function filter_json() {
+	local filtered=''
+	filtered=$(echo "$1" | \
+		jq --arg country "$2" '.locations[] 
+		| select(.country_code | test($country; "ig")) // empty')
+
+	if [ $2 != 'world' ] && [ -n "$3" ]; then
+		filtered=$(echo "$filtered" | \
+			jq --arg prov "$3" 'select(.province | test($prov; "ig")) // empty')
+	fi
+
+	# county data only available to US for now
+	if [ $2 = 'us' ] && [ -n "$4" ]; then
+		filtered=$(echo "$filtered" | \
+			jq --arg cty "$4" 'select(.county | test($cty; "ig")) // empty')
+	fi
+	echo $filtered
+}
+
+# Prints properly formatted country name, county, province
+# $1: name of data point
+# $2: number associated with data point
+# $3: delta (optional)
+# Output: formatted string to stdout
+function output() {
+	format="\e[1m%9s:\e[0m%'${width}d"
+	env LC_ALL=en_US.UTF-8 printf "$format" "$1" $2
+	if [ -n "$3" ]; then
+		env LC_ALL=en_US.UTF-8 printf " (%+'d)" $3
+	fi
+	printf "\n"
+}
+
+# Prints properly formatted country name, county, province
+# $1: country
+# $2: province
+# $3: county
+# Output: formatted string to stdout
+function output_title() {
+	printf "\e[1;4m%s" "$1" 
+	[ -n "$2" ] && printf "\e[0;4m >> %s" "$2"
+	[ -n "$3" ] && printf " > %s County" "$3"
+	printf "\e[0m\n"
+}
+
+# prints formatted timestamps
+# $1: last snapshot date, if any
+# $2: previous snapshot date, if any
+# $3: API reload date
+function output_delta_info() {
+	[ -n "$1" ] && printf "latest snapshot %s\n" $(echo $1 | cut -d 'T' -f1)
+	[ -n "$2" ] && printf "     delta from %s\n" $(echo $2 | cut -d 'T' -f1)
+	[ -n "$3" ] && printf "     API reload %s\n" "$(echo $3 | cut -d ':' -f1-2 | sed 's/T/ /')"
+}
+
+# capitalizes first letter of each word
+# $@ word(s)
+# Output: properly capitalzied string to stdout
+function capitalize() {
+	local str=''
+	while [ $# -gt 0 ]; do
+		str="${str} ${1^}"
+		shift 1
+	done
+	echo $str
+}
+# ------------------------------------------------------------------------------
+
+# test getopt 
+getopt --test > /dev/null 2>&1
+if [ ! $? -eq 4 ]; then 
+	echo "${script}: 'getopt' failure"
+fi
+
+country_code=''
+province=''
+county=''
+refresh=0
+use_cache=1
+raw_output=0
+parse_opts $0 "$@"
+
+# live-query url or fetch data from cache
+if [ $country_code = 'us' ] && [ -n "$province" ]; then
+	# US regional timeine data is missing
+	timeline=0
+else
+	timeline=1
+fi
+data=''
+if [ $use_cache -eq 1 ]; then
+	cache=$(get_cache_path $country_code "$province")
+	url=$(build_cache_url $country_code "$province")
+	
+	if [ -e "$cache" ]; then
+		sec=$(elapsed_sec "$cache")
+	else
+		sec=$(($refresh_interval+1))
+	fi
+
+	if [ $refresh -eq 1 ] || [ $sec -gt $refresh_interval ]; then
+		echo "Loading files..."
+		data=$(get_url $url)
+		echo $data > "$cache"
+	else
+		data=$(cat $cache)
+	fi
+else
+	url=$(build_url $country_code "$province" "$county" $timeline)
+	data=$(get_url $url)
+	temp=$(echo $data | jq '.latest // empty')
+	if [ -z "$temp" ]; then
+		none_found $country_code "$province" "$county"
+		exit 1
+	fi
+	unset temp
+fi
+
+
+# reduce JSON down to a manageable size
+filtered=''
+if [ $country_code != 'world' ]; then
+	filtered=$(filter_json "$data" $country_code "$province" "$county")
+else
+	filtered="$(echo $data | jq '.locations[] | .')"
+fi
+# exit on botched query
+if [ -z "$filtered" ]; then
+	none_found $country_code "$province" "$county"
+	exit 1
+fi
+
+# begin fetching data
+if [ $use_cache -eq 1 ]; then
+	read confirmed deaths recovered < <(get_values "$filtered")
+	read population last_updated country < <(get_country_info "$filtered")
+else
+	read confirmed deaths recovered < <(get_live_values "$data")
+	read country population last_updated < <(get_live_country_info "$data")
+fi
+if [ $timeline -eq 1 ]; then
+	read d_confirmed d_deaths d_recovered new_updated old_updated < <(delta "$filtered" $confirmed $deaths $recovered)
+fi
+if [ $country_code = 'world' ]; then
+	country='World'
+fi
+
+# csv output
+if [ $raw_output -eq 1 ]; then
+	echo $country_code,$province,$county,\
+$confirmed,$deaths,$recovered,\
+$d_confirmed,$d_deaths,$d_recovered,$new_updated
+	exit 0
+fi
+width=8
+conf_len=$(expr length + "$(numfmt --grouping $confirmed)")
+dead_len=$(expr length + "$(numfmt --grouping $deaths)")
+if [ $conf_len -gt $dead_len ]; then
+	width=$(($conf_len+1))
+else
+	width=$(($dead_len+1))
+fi
+
+output_title "$country" "$(capitalize $province)" "$(capitalize $county)"
+echo ''
+output "Confirmed" $confirmed $d_confirmed
+output "Deaths" $deaths $d_deaths
+echo ''
+if [ $timeline -eq 1 ]; then
+	output_delta_info $new_updated $old_updated $last_updated
+else
+	output_delta_info "" "" $last_updated
+fi
