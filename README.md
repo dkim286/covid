@@ -1,23 +1,35 @@
 # `covid`
+
 A terminal-based COVID tracker.
 
-## What
+## Description
 
 `covid` is a long-winded Bash script for querying the [Coronavirus Tracker API](https://github.com/ExpDev07/coronavirus-tracker-api).
+
 By default, `covid` loads the JSON files to disk (`$XDG_CACHE_HOME` or `$HOME/.cache`) and queries them locally. If you don't want this behavior, run the script with the `-n, --no-cache` option.
 
 ## Dependencies
 
 [jq](https://github.com/stedolan/jq)
 
-## How
+## Installation
+
+Install or copy the `covid` file to a convenient location. 
+
+```text
+$ install covid $HOME/.local/bin
+```
+
+## Usage
 
 ```text
 $ covid <country> [, [state|province], [county]]
 ```
+
 All params are case-insensitive. 
 
 * `<country>`: Either an ISO 3166 country code (`US`, `ca`, `Au`, ...) or `world` if you want to view the worldwide stats.
+
 * `[state|province]`: Full name of the state or province (`alberta`, `California`, ...). Only available for some countries.
 	* `[county]`: Full name of the county (`los angeles`, `new york`, `orange` ...) without the 'county' part. Only available for U.S. state queries.
 
