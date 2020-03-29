@@ -10,7 +10,9 @@ By default, `covid` loads the JSON files to disk (`$XDG_CACHE_HOME` or `$HOME/.c
 
 ## Dependencies
 
-[jq](https://github.com/stedolan/jq)
+* [jq](https://github.com/stedolan/jq)
+
+* macOS: [gnu-getopt](https://formulae.brew.sh/formula/gnu-getopt)
 
 ## Installation
 
@@ -36,15 +38,15 @@ All params are case-insensitive.
 ### Examples:
 
 ```text
-$ covid us
-US
+$ covid gb
+United Kingdom
 
-Confirmed: 101,657 (+17,821)
-   Deaths:   1,581 (+372)
+Confirmed: 14,745 (+2,933)
+   Deaths:    761 (+181)
 
 latest snapshot 2020-03-27
      delta from 2020-03-26
-     API reload 2020-03-28 17:55
+     API reload 2020-03-28 23:14
 ```
 
 ```text
